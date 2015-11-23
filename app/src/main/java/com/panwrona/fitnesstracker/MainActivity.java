@@ -12,9 +12,21 @@ import com.google.android.gms.common.ConnectionResult;
 import com.google.android.gms.common.GooglePlayServicesUtil;
 import com.google.android.gms.common.Scopes;
 import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.common.api.ResultCallback;
 import com.google.android.gms.common.api.Scope;
+import com.google.android.gms.common.api.Status;
 import com.google.android.gms.fitness.Fitness;
 import com.google.android.gms.fitness.FitnessActivities;
+import com.google.android.gms.fitness.data.DataPoint;
+import com.google.android.gms.fitness.data.DataSource;
+import com.google.android.gms.fitness.data.DataType;
+import com.google.android.gms.fitness.data.Field;
+import com.google.android.gms.fitness.data.Value;
+import com.google.android.gms.fitness.request.DataSourcesRequest;
+import com.google.android.gms.fitness.request.OnDataPointListener;
+import com.google.android.gms.fitness.request.SensorRequest;
+import com.google.android.gms.fitness.result.DataSourcesResult;
+import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends Activity {
 
@@ -32,6 +44,16 @@ public class MainActivity extends Activity {
     private GoogleApiClient mClient = null;
 
     private TextView mTextView;
+    private OnDataPointListener mListener = new OnDataPointListener() {
+        @Override
+        public void onDataPoint(DataPoint dataPoint) {
+            for (Field field : dataPoint.getDataType().getFields()) {
+                Value val = dataPoint.getValue(field);
+                Log.i(TAG, "Detected DataPoint field: " + field.getName());
+                Log.i(TAG, "Detected DataPoint value: " + val);
+            }
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -44,11 +66,56 @@ public class MainActivity extends Activity {
                 mTextView = (TextView) stub.findViewById(R.id.text);
             }
         });
-        if (savedInstanceState != null) {
-            authInProgress = savedInstanceState.getBoolean(AUTH_PENDING);
-        }
+        //if (savedInstanceState != null) {
+        //    authInProgress = savedInstanceState.getBoolean(AUTH_PENDING);
+        //}
+		//
+        //buildFitnessClient();
 
-        buildFitnessClient();
+        Fitness.SensorsApi.findDataSources(mClient, new DataSourcesRequest.Builder()
+            // At least one datatype must be specified.
+            .setDataTypes(DataType.TYPE_LOCATION_SAMPLE)
+                // Can specify whether data type is raw or derived.
+            .setDataSourceTypes(DataSource.TYPE_RAW)
+            .build())
+            .setResultCallback(new ResultCallback<DataSourcesResult>() {
+                @Override
+                public void onResult(DataSourcesResult dataSourcesResult) {
+                    Log.i(TAG, "Result: " + dataSourcesResult.getStatus().toString());
+                    for (DataSource dataSource : dataSourcesResult.getDataSources()) {
+                        Log.i(TAG, "Data source found: " + dataSource.toString());
+                        Log.i(TAG, "Data Source type: " + dataSource.getDataType().getName());
+
+                        //Let's register a listener to receive Activity data!
+                        if (dataSource.getDataType().equals(DataType.TYPE_LOCATION_SAMPLE)
+                            && mListener == null) {
+                            Log.i(TAG, "Data source for LOCATION_SAMPLE found!  Registering.");
+                            registerFitnessDataListener(dataSource,
+                                DataType.TYPE_LOCATION_SAMPLE);
+                        }
+                    }
+                }
+            });
+    }
+
+    private void registerFitnessDataListener(DataSource dataSource, DataType typeLocationSample) {
+        Fitness.SensorsApi.add(
+            mClient,
+            new SensorRequest.Builder()
+                .setDataType(DataType.TYPE_HEART_RATE_BPM) // Can't be omitted.
+                .setSamplingRate(10, TimeUnit.SECONDS)
+                .build(),
+            mListener)
+            .setResultCallback(new ResultCallback<Status>() {
+                @Override
+                public void onResult(Status status) {
+                    if (status.isSuccess()) {
+                        Log.i(TAG, "Listener registered!");
+                    } else {
+                        Log.i(TAG, "Listener not registered.");
+                    }
+                }
+            });
     }
 
     /**
@@ -63,7 +130,7 @@ public class MainActivity extends Activity {
         // Create the Google API Client
         mClient = new GoogleApiClient.Builder(this)
                 .addApi(Fitness.SENSORS_API)
-                .addScope(new Scope(Scopes.FITNESS_LOCATION_READ))
+                .addScope(new Scope(Scopes.FITNESS_ACTIVITY_READ))
                 .addConnectionCallbacks(
                         new GoogleApiClient.ConnectionCallbacks() {
 
