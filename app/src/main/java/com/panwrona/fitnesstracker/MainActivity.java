@@ -1,222 +1,308 @@
 package com.panwrona.fitnesstracker;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.content.DialogInterface;
+import android.content.DialogInterface.OnCancelListener;
 import android.content.Intent;
-import android.content.IntentSender;
+import android.content.IntentSender.SendIntentException;
+import android.os.AsyncTask;
 import android.os.Bundle;
-import android.support.wearable.view.WatchViewStub;
 import android.util.Log;
-import android.widget.TextView;
-
+import android.view.View;
+import android.widget.Button;
+import android.widget.Toast;
 import com.google.android.gms.common.ConnectionResult;
 import com.google.android.gms.common.GooglePlayServicesUtil;
-import com.google.android.gms.common.Scopes;
 import com.google.android.gms.common.api.GoogleApiClient;
 import com.google.android.gms.common.api.ResultCallback;
-import com.google.android.gms.common.api.Scope;
-import com.google.android.gms.common.api.Status;
 import com.google.android.gms.fitness.Fitness;
-import com.google.android.gms.fitness.FitnessActivities;
-import com.google.android.gms.fitness.data.DataPoint;
-import com.google.android.gms.fitness.data.DataSource;
-import com.google.android.gms.fitness.data.DataType;
-import com.google.android.gms.fitness.data.Field;
-import com.google.android.gms.fitness.data.Value;
-import com.google.android.gms.fitness.request.DataSourcesRequest;
-import com.google.android.gms.fitness.request.OnDataPointListener;
-import com.google.android.gms.fitness.request.SensorRequest;
-import com.google.android.gms.fitness.result.DataSourcesResult;
-import java.util.concurrent.TimeUnit;
+import com.google.android.gms.wearable.MessageApi;
+import com.google.android.gms.wearable.MessageEvent;
+import com.google.android.gms.wearable.Node;
+import com.google.android.gms.wearable.NodeApi;
+import com.google.android.gms.wearable.Wearable;
+import java.util.Collection;
+import java.util.HashSet;
 
-public class MainActivity extends Activity {
+public class MainActivity extends Activity implements
+    GoogleApiClient.ConnectionCallbacks,
+    GoogleApiClient.OnConnectionFailedListener, MessageApi.MessageListener {
 
-    private static final int REQUEST_OAUTH = 1;
+    private static final String TAG = "GooglePlayServicesActivity";
+
+    private static final String KEY_IN_RESOLUTION = "is_in_resolution";
+    private static final String FITNESS_IN_RES = "is_in_resolution";
+
+    public static final String START_ACTIVITY_PATH = "/start/MainActivity";
+
+    public static final String CONNECT_FITNESS = "/connect/fitness";
 
     /**
-     * Track whether an authorization activity is stacking over the current activity, i.e. when
-     * a known auth error is being resolved, such as showing the account chooser or presenting a
-     * consent dialog. This avoids common duplications as might happen on screen rotations, etc.
+     * Request code for auto Google Play Services error resolution.
      */
-    private static final String AUTH_PENDING = "auth_state_pending";
-    private static final String TAG = MainActivity.class.getSimpleName();
-    private boolean authInProgress = false;
+    protected static final int REQUEST_CODE_RESOLUTION = 1;
+    protected static final int REQUEST_FITNESS_RES = 2;
 
-    private GoogleApiClient mClient = null;
+    /**
+     * Google API client.
+     */
+    private GoogleApiClient mGoogleApiClient;
 
-    private TextView mTextView;
-    private OnDataPointListener mListener = new OnDataPointListener() {
-        @Override
-        public void onDataPoint(DataPoint dataPoint) {
-            for (Field field : dataPoint.getDataType().getFields()) {
-                Value val = dataPoint.getValue(field);
-                Log.i(TAG, "Detected DataPoint field: " + field.getName());
-                Log.i(TAG, "Detected DataPoint value: " + val);
-            }
-        }
-    };
+    private GoogleApiClient mFitnessClient;
 
+    /**
+     * Determines if the client is in a resolution state, and
+     * waiting for resolution intent to return.
+     */
+    private boolean mWearIsInResolution;
+    private boolean mFitnessIsInRes;
+
+    /**
+     * Called when the activity is starting. Restores the activity state.
+     */
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (savedInstanceState != null) {
+            mWearIsInResolution = savedInstanceState.getBoolean(KEY_IN_RESOLUTION, false);
+            mFitnessIsInRes = savedInstanceState.getBoolean(FITNESS_IN_RES, false);
+        }
+
         setContentView(R.layout.activity_main);
-        final WatchViewStub stub = (WatchViewStub) findViewById(R.id.watch_view_stub);
-        stub.setOnLayoutInflatedListener(new WatchViewStub.OnLayoutInflatedListener() {
+        buildFitnessClient();
+        Button msgButton = (Button) findViewById(R.id.msgButton);
+        msgButton.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void onLayoutInflated(WatchViewStub stub) {
-                mTextView = (TextView) stub.findViewById(R.id.text);
+            public void onClick(View v) {
+                new StartWearableTask().execute();
             }
         });
-        //if (savedInstanceState != null) {
-        //    authInProgress = savedInstanceState.getBoolean(AUTH_PENDING);
-        //}
-		//
-        //buildFitnessClient();
-
-        Fitness.SensorsApi.findDataSources(mClient, new DataSourcesRequest.Builder()
-            // At least one datatype must be specified.
-            .setDataTypes(DataType.TYPE_LOCATION_SAMPLE)
-                // Can specify whether data type is raw or derived.
-            .setDataSourceTypes(DataSource.TYPE_RAW)
-            .build())
-            .setResultCallback(new ResultCallback<DataSourcesResult>() {
-                @Override
-                public void onResult(DataSourcesResult dataSourcesResult) {
-                    Log.i(TAG, "Result: " + dataSourcesResult.getStatus().toString());
-                    for (DataSource dataSource : dataSourcesResult.getDataSources()) {
-                        Log.i(TAG, "Data source found: " + dataSource.toString());
-                        Log.i(TAG, "Data Source type: " + dataSource.getDataType().getName());
-
-                        //Let's register a listener to receive Activity data!
-                        if (dataSource.getDataType().equals(DataType.TYPE_LOCATION_SAMPLE)
-                            && mListener == null) {
-                            Log.i(TAG, "Data source for LOCATION_SAMPLE found!  Registering.");
-                            registerFitnessDataListener(dataSource,
-                                DataType.TYPE_LOCATION_SAMPLE);
-                        }
-                    }
-                }
-            });
-    }
-
-    private void registerFitnessDataListener(DataSource dataSource, DataType typeLocationSample) {
-        Fitness.SensorsApi.add(
-            mClient,
-            new SensorRequest.Builder()
-                .setDataType(DataType.TYPE_HEART_RATE_BPM) // Can't be omitted.
-                .setSamplingRate(10, TimeUnit.SECONDS)
-                .build(),
-            mListener)
-            .setResultCallback(new ResultCallback<Status>() {
-                @Override
-                public void onResult(Status status) {
-                    if (status.isSuccess()) {
-                        Log.i(TAG, "Listener registered!");
-                    } else {
-                        Log.i(TAG, "Listener not registered.");
-                    }
-                }
-            });
     }
 
     /**
-     * Build a {@link GoogleApiClient} that will authenticate the user and allow the application
-     * to connect to Fitness APIs. The scopes included should match the scopes your app needs
-     * (see documentation for details). Authentication will occasionally fail intentionally,
-     * and in those cases, there will be a known resolution, which the OnConnectionFailedListener()
-     * can address. Examples of this include the user never having signed in before, or having
-     * multiple accounts on the device and needing to specify which account to use, etc.
+     * Called when the Activity is made visible.
+     * A connection to Play Services need to be initiated as
+     * soon as the activity is visible. Registers {@code ConnectionCallbacks}
+     * and {@code OnConnectionFailedListener} on the
+     * activities itself.
      */
-    private void buildFitnessClient() {
-        // Create the Google API Client
-        mClient = new GoogleApiClient.Builder(this)
-                .addApi(Fitness.SENSORS_API)
-                .addScope(new Scope(Scopes.FITNESS_ACTIVITY_READ))
-                .addConnectionCallbacks(
-                        new GoogleApiClient.ConnectionCallbacks() {
-
-                            @Override
-                            public void onConnected(Bundle bundle) {
-                                Log.i(TAG, "Connected!!!");
-                                // Now you can make calls to the Fitness APIs.
-                                // Put application specific code here.
-                            }
-
-                            @Override
-                            public void onConnectionSuspended(int i) {
-                                // If your connection to the sensor gets lost at some point,
-                                // you'll be able to determine the reason and react to it here.
-                                if (i == GoogleApiClient.ConnectionCallbacks.CAUSE_NETWORK_LOST) {
-                                    Log.i(TAG, "Connection lost.  Cause: Network Lost.");
-                                } else if (i == GoogleApiClient.ConnectionCallbacks.CAUSE_SERVICE_DISCONNECTED) {
-                                    Log.i(TAG, "Connection lost.  Reason: Service Disconnected");
-                                }
-                            }
-                        }
-                )
-                .addOnConnectionFailedListener(
-                        new GoogleApiClient.OnConnectionFailedListener() {
-                            // Called whenever the API client fails to connect.
-                            @Override
-                            public void onConnectionFailed(ConnectionResult result) {
-                                Log.i(TAG, "Connection failed. Cause: " + result.toString());
-                                if (!result.hasResolution()) {
-                                    // Show the localized error dialog
-                                    GooglePlayServicesUtil.getErrorDialog(result.getErrorCode(),
-                                            MainActivity.this, 0).show();
-                                    return;
-                                }
-                                // The failure has a resolution. Resolve it.
-                                // Called typically when the app is not yet authorized, and an
-                                // authorization dialog is displayed to the user.
-                                if (!authInProgress) {
-                                    try {
-                                        Log.i(TAG, "Attempting to resolve failed connection");
-                                        authInProgress = true;
-                                        result.startResolutionForResult(MainActivity.this,
-                                                REQUEST_OAUTH);
-                                    } catch (IntentSender.SendIntentException e) {
-                                        Log.e(TAG,
-                                                "Exception while starting resolution activity", e);
-                                    }
-                                }
-                            }
-                        }
-                )
-                .build();
-    }
-
     @Override
     protected void onStart() {
         super.onStart();
-        // Connect to the Fitness API
-        Log.i(TAG, "Connecting...");
-        mClient.connect();
+        if (mGoogleApiClient == null) {
+            mGoogleApiClient = new GoogleApiClient.Builder(this).addApi(Wearable.API)
+                .addConnectionCallbacks(this)
+                .addOnConnectionFailedListener(this)
+                .build();
+        }
+        mGoogleApiClient.connect();
+
+        if (mFitnessClient == null) {
+            buildFitnessClient();
+        }
+        mFitnessClient.connect();
     }
 
+    /**
+     * Called when activity gets invisible. Connection to Play Services needs to
+     * be disconnected as soon as an activity is invisible.
+     */
     @Override
     protected void onStop() {
+        if (mGoogleApiClient != null) {
+            mGoogleApiClient.disconnect();
+            Wearable.MessageApi.removeListener(mGoogleApiClient, this);
+        }
+        if (mFitnessClient != null) {
+            mFitnessClient.disconnect();
+        }
         super.onStop();
-        if (mClient.isConnected()) {
-            mClient.disconnect();
-        }
     }
 
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (requestCode == REQUEST_OAUTH) {
-            authInProgress = false;
-            if (resultCode == RESULT_OK) {
-                // Make sure the app is not already connected or attempting to connect
-                if (!mClient.isConnecting() && !mClient.isConnected()) {
-                    mClient.connect();
-                }
-            }
-        }
-    }
-
+    /**
+     * Saves the resolution state.
+     */
     @Override
     protected void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
-        outState.putBoolean(AUTH_PENDING, authInProgress);
+        outState.putBoolean(KEY_IN_RESOLUTION, mWearIsInResolution);
+        outState.putBoolean(FITNESS_IN_RES, mFitnessIsInRes);
+    }
+
+    /**
+     * Handles Google Play Services resolution callbacks.
+     */
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        switch (requestCode) {
+            case REQUEST_CODE_RESOLUTION:
+                retryConnecting();
+                break;
+            case REQUEST_FITNESS_RES:
+                retryFitnessConnect();
+                break;
+        }
+    }
+
+    private void retryConnecting() {
+        mWearIsInResolution = false;
+        if (!mGoogleApiClient.isConnecting()) {
+            mGoogleApiClient.connect();
+        }
+    }
+
+    /**
+     * Called when {@code mGoogleApiClient} is connected.
+     */
+    @Override
+    public void onConnected(Bundle connectionHint) {
+        Log.d(TAG, "GoogleApiClient connected");
+        // TODO: Start making API requests.
+        Wearable.MessageApi.addListener(mGoogleApiClient, this);
+    }
+
+    /**
+     * Called when {@code mGoogleApiClient} connection is suspended.
+     */
+    @Override
+    public void onConnectionSuspended(int cause) {
+        Log.d(TAG, "GoogleApiClient connection suspended");
+        retryConnecting();
+    }
+
+    /**
+     * Called when {@code mGoogleApiClient} is trying to connect but failed.
+     * Handle {@code result.getResolution()} if there is a resolution
+     * available.
+     */
+    @Override
+    public void onConnectionFailed(ConnectionResult result) {
+        Log.i(TAG, "GoogleApiClient connection failed: " + result.toString());
+        if (!result.hasResolution()) {
+            // Show a localized error dialog.
+            GooglePlayServicesUtil.getErrorDialog(result.getErrorCode(), this, 0,
+                new OnCancelListener() {
+                    @Override
+                    public void onCancel(DialogInterface dialog) {
+                        retryConnecting();
+                    }
+                }).show();
+            return;
+        }
+        // If there is an existing resolution error being displayed or a resolution
+        // activity has started before, do nothing and wait for resolution
+        // progress to be completed.
+        if (mWearIsInResolution) {
+            return;
+        }
+        mWearIsInResolution = true;
+        try {
+            result.startResolutionForResult(this, REQUEST_CODE_RESOLUTION);
+        } catch (SendIntentException e) {
+            Log.e(TAG, "Exception while starting resolution activity", e);
+            retryConnecting();
+        }
+    }
+
+    private void sendStartActivityMessage(String nodeId) {
+        Wearable.MessageApi.sendMessage(mGoogleApiClient, nodeId, START_ACTIVITY_PATH, new byte[0])
+            .setResultCallback(new ResultCallback<MessageApi.SendMessageResult>() {
+                @Override
+                public void onResult(MessageApi.SendMessageResult sendMessageResult) {
+                    if (!sendMessageResult.getStatus().isSuccess()) {
+                        Log.e(TAG,
+                            "Failed to send msg with status code: " + sendMessageResult.getStatus()
+                                .getStatusCode());
+                    }
+                }
+            });
+    }
+
+    private Collection<String> getNodes() {
+        HashSet<String> results = new HashSet<String>();
+        NodeApi.GetConnectedNodesResult nodes =
+            Wearable.NodeApi.getConnectedNodes(mGoogleApiClient).await();
+        for (Node node : nodes.getNodes()) {
+            results.add(node.getId());
+        }
+        return results;
+    }
+
+    @Override
+    public void onMessageReceived(MessageEvent messageEvent) {
+        if (messageEvent.getPath().equals(CONNECT_FITNESS)) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    Toast.makeText(MainActivity.this, "FitnessConnect", Toast.LENGTH_SHORT).show();
+                }
+            });
+        }
+    }
+
+    private class StartWearableTask extends AsyncTask<Void, Void, Void> {
+        @Override
+        protected Void doInBackground(Void... params) {
+            Collection<String> nodes = getNodes();
+            for (String n : nodes) {
+                sendStartActivityMessage(n);
+            }
+            return null;
+        }
+    }
+
+    private void buildFitnessClient() {
+        mFitnessClient = new GoogleApiClient.Builder(this).addApi(Fitness.SENSORS_API)
+            .addScope(Fitness.SCOPE_ACTIVITY_READ)
+            .addConnectionCallbacks(new GoogleApiClient.ConnectionCallbacks() {
+                @Override
+                public void onConnected(Bundle bundle) {
+                    Log.d(TAG, "Fitness client connected");
+                    new StartWearableTask().execute();
+                }
+
+                @Override
+                public void onConnectionSuspended(int i) {
+                    Log.d(TAG, "Fitness client suspended");
+                    retryFitnessConnect();
+                }
+            })
+            .addOnConnectionFailedListener(new GoogleApiClient.OnConnectionFailedListener() {
+                @Override
+                public void onConnectionFailed(ConnectionResult result) {
+                    Log.d(TAG, "Fitness Connection failed");
+                    if (!result.hasResolution()) {
+                        // Show a localized error dialog.
+                        GooglePlayServicesUtil.getErrorDialog(result.getErrorCode(),
+                            MainActivity.this, 0, new OnCancelListener() {
+                                @Override
+                                public void onCancel(DialogInterface dialog) {
+                                    retryFitnessConnect();
+                                }
+                            }).show();
+                        return;
+                    }
+                    if (mFitnessIsInRes) {
+                        return;
+                    }
+
+                    try {
+                        result.startResolutionForResult(MainActivity.this, REQUEST_FITNESS_RES);
+                    } catch (SendIntentException e) {
+                        Log.e(TAG, "Exception while starting resolution activity", e);
+                        retryFitnessConnect();
+                    }
+                }
+            })
+            .build();
+    }
+
+    public void retryFitnessConnect() {
+        mFitnessIsInRes = false;
+        if (!mFitnessClient.isConnecting()) {
+            mFitnessClient.connect();
+        }
     }
 }

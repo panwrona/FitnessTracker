@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.panwrona.fitnesstracker" >
+    package="com.panwrona.mobile" >
 
     <application
         android:allowBackup="true"
@@ -15,4 +15,5 @@
             </intent-filter>
         </activity>
     </application>
+
 </manifest>
